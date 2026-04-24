@@ -309,10 +309,15 @@ EOF
   fi
 
   echo "  launching Claude (mode=$MODE, budget=\$$BUDGET, log=$LOG)"
+  # Feed the prompt via stdin instead of argv. On Windows/MSYS, argv has a hard
+  # ~32 KiB cap (CreateProcess) and long prompts trip `execve: E2BIG` before the
+  # CLI even starts (rc=126). Bash's `<<<` materializes the here-string through
+  # a temp file, so stdin avoids the limit entirely.
   set +e
-  ( cd "$WT" && claude -p "$PROMPT" \
+  ( cd "$WT" && claude -p \
       --dangerously-skip-permissions \
       --max-budget-usd "$BUDGET" \
+      <<<"$PROMPT"
   ) >"$LOG" 2>&1
   RC=$?
   set -e
