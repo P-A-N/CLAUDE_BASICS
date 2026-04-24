@@ -37,14 +37,16 @@ For each target N, inspect `.worktrees/issue-N`:
 git -C .worktrees/issue-N status --porcelain 2>/dev/null
 ```
 
-If there are uncommitted/untracked files, quote them to the user and ask whether to discard:
-- Research mode typically leaves `RESEARCH_FINDINGS.md` only — content is already posted to the issue as a comment, so it's safe to discard after user confirmation.
-- Anything else: surface it, let the user decide.
+Decide how to handle dirty state:
 
-After user confirms (or if clean), clean up:
+- **Only `RESEARCH_FINDINGS.md` is dirty** → auto-delete and proceed without asking. The content is already posted to the issue as a comment, so it's expected leftover from a prior research run.
+- **Any other uncommitted/untracked files present** (with or without `RESEARCH_FINDINGS.md`) → quote them to the user and ask whether to discard. Don't auto-touch.
+- **Clean** → proceed.
+
+Cleanup (after auto-discard or user confirmation):
 
 ```bash
-rm -f .worktrees/issue-N/<files>    # only if user confirmed discard
+rm -f .worktrees/issue-N/<files>
 git worktree remove .worktrees/issue-N
 git branch -D auto/issue-N 2>/dev/null || true
 ```
