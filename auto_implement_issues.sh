@@ -23,6 +23,8 @@ IMPL_LABEL="auto-ok"
 RESEARCH_LABEL="research"
 DONE_IMPL_LABEL="auto-implemented"
 DONE_RESEARCH_LABEL="auto-researched"
+NOT_FIXED_LABEL="not-fixed"
+NEED_CONFIRM_LABEL="need-confirm"
 LIMIT=5
 BUDGET=5
 DRY_RUN=0
@@ -62,33 +64,59 @@ gh label create "$DONE_IMPL_LABEL"     --color 0E8A16 \
   --description "Auto-implemented by scripts/auto_implement_issues.sh" >/dev/null 2>&1 || true
 gh label create "$DONE_RESEARCH_LABEL" --color 1D76DB \
   --description "Auto-researched by scripts/auto_implement_issues.sh" >/dev/null 2>&1 || true
+gh label create "$NEED_CONFIRM_LABEL"  --color FBCA04 \
+  --description "Auto re-run completed; awaiting user verification" >/dev/null 2>&1 || true
 
 if [[ -n "$TARGET_ISSUE" ]]; then
   echo "Fetching single issue #$TARGET_ISSUE..."
   RAW=$(gh issue view "$TARGET_ISSUE" --json number,title,url,body,labels)
   HAS_RESEARCH=$(jq --arg L "$RESEARCH_LABEL" '[.labels[].name] | index($L) != null' <<<"$RAW")
   HAS_DONE_RESEARCH=$(jq --arg L "$DONE_RESEARCH_LABEL" '[.labels[].name] | index($L) != null' <<<"$RAW")
-  if [[ "$HAS_RESEARCH" == "true" && "$HAS_DONE_RESEARCH" == "false" ]]; then
+  HAS_DONE_IMPL=$(jq --arg L "$DONE_IMPL_LABEL" '[.labels[].name] | index($L) != null' <<<"$RAW")
+  HAS_NOT_FIXED=$(jq --arg L "$NOT_FIXED_LABEL" '[.labels[].name] | index($L) != null' <<<"$RAW")
+  if [[ "$HAS_NOT_FIXED" == "true" && "$HAS_DONE_IMPL" == "true" ]]; then
+    # Re-run requested for an already-implemented issue
+    MODE_FORCED="implement"
+  elif [[ "$HAS_NOT_FIXED" == "true" && "$HAS_DONE_RESEARCH" == "true" ]]; then
+    # Re-run requested for a previously-researched-only issue
+    MODE_FORCED="research"
+  elif [[ "$HAS_RESEARCH" == "true" && "$HAS_DONE_RESEARCH" == "false" ]]; then
     MODE_FORCED="research"
   else
     MODE_FORCED="implement"
   fi
-  ISSUES=$(jq --arg m "$MODE_FORCED" \
-    '[{number, title, url, body, mode:$m}]' <<<"$RAW")
+  ISSUES=$(jq --arg m "$MODE_FORCED" --argjson nf "$HAS_NOT_FIXED" \
+    '[{number, title, url, body, mode:$m, not_fixed:$nf}]' <<<"$RAW")
 else
-  # Fetch both label sets, tag with mode, dedupe (research wins when both present).
-  echo "Fetching issues: impl=$IMPL_LABEL, research=$RESEARCH_LABEL (limit=$LIMIT each)..."
+  # Fetch label sets, tag with mode, dedupe (research wins when both present).
+  # Also pull "not-fixed" issues regardless of done-label so the user can
+  # request a re-run by adding the not-fixed label.
+  echo "Fetching issues: impl=$IMPL_LABEL, research=$RESEARCH_LABEL, re-run=$NOT_FIXED_LABEL (limit=$LIMIT each)..."
+  NF_JQ='[.[] | . + {not_fixed: ([.labels[].name] | index("'"$NOT_FIXED_LABEL"'") != null)}]'
   RESEARCH_ISSUES=$(gh issue list --state open --limit "$LIMIT" \
     --search "label:$RESEARCH_LABEL -label:$DONE_RESEARCH_LABEL" \
-    --json number,title,url,body \
-    | jq '[.[] | . + {mode:"research"}]')
+    --json number,title,url,body,labels \
+    | jq "$NF_JQ"' | [.[] | . + {mode:"research"}]')
   IMPL_ISSUES=$(gh issue list --state open --limit "$LIMIT" \
     --search "label:$IMPL_LABEL -label:$DONE_IMPL_LABEL" \
-    --json number,title,url,body \
-    | jq '[.[] | . + {mode:"implement"}]')
+    --json number,title,url,body,labels \
+    | jq "$NF_JQ"' | [.[] | . + {mode:"implement"}]')
+  NF_RESEARCH_ISSUES=$(gh issue list --state open --limit "$LIMIT" \
+    --search "label:$RESEARCH_LABEL label:$NOT_FIXED_LABEL label:$DONE_RESEARCH_LABEL -label:$DONE_IMPL_LABEL" \
+    --json number,title,url,body,labels \
+    | jq '[.[] | . + {mode:"research", not_fixed:true}]')
+  NF_IMPL_ISSUES=$(gh issue list --state open --limit "$LIMIT" \
+    --search "label:$IMPL_LABEL label:$NOT_FIXED_LABEL label:$DONE_IMPL_LABEL" \
+    --json number,title,url,body,labels \
+    | jq '[.[] | . + {mode:"implement", not_fixed:true}]')
+  # Priority order: standard research → standard impl → re-run impl → re-run research.
+  # Puts implement-mode re-runs ahead of research-mode re-runs when the issue
+  # was previously implemented, so we re-attempt the fix rather than drop back
+  # to research. unique_by keeps the first occurrence.
   ISSUES=$(jq -s --argjson lim "$LIMIT" \
-    '(.[0] + .[1]) | unique_by(.number) | .[:$lim]' \
-    <(echo "$RESEARCH_ISSUES") <(echo "$IMPL_ISSUES"))
+    '(.[0] + .[1] + .[2] + .[3]) | unique_by(.number) | .[:$lim]' \
+    <(echo "$RESEARCH_ISSUES") <(echo "$IMPL_ISSUES") \
+    <(echo "$NF_IMPL_ISSUES") <(echo "$NF_RESEARCH_ISSUES"))
 fi
 COUNT=$(jq 'length' <<<"$ISSUES")
 echo "Found $COUNT issue(s)"
@@ -109,6 +137,7 @@ for i in $(seq 0 $((COUNT-1))); do
   URL=$(jq -r ".[$i].url" <<<"$ISSUES")
   BODY=$(jq -r ".[$i].body" <<<"$ISSUES")
   MODE=$(jq -r ".[$i].mode" <<<"$ISSUES")
+  NOT_FIXED=$(jq -r ".[$i].not_fixed // false" <<<"$ISSUES")
 
   # Pull comments so impl mode sees prior research findings / user decisions.
   COMMENTS=$(gh issue view "$NUM" --json comments \
@@ -119,7 +148,11 @@ for i in $(seq 0 $((COUNT-1))); do
   LOG="$LOG_DIR/issue-$NUM.log"
 
   echo ""
-  echo "=== [$MODE] Issue #$NUM: $TITLE ==="
+  if [[ "$NOT_FIXED" == "true" ]]; then
+    echo "=== [$MODE / re-run: $NOT_FIXED_LABEL] Issue #$NUM: $TITLE ==="
+  else
+    echo "=== [$MODE] Issue #$NUM: $TITLE ==="
+  fi
 
   # Handle leftover branch/worktree from a prior run. If the user removed the
   # done-label (auto-implemented / auto-researched) and added feedback comments
@@ -190,16 +223,29 @@ for i in $(seq 0 $((COUNT-1))); do
   echo "  creating worktree: $WT (branch $BRANCH from main)"
   git -C "$REPO_ROOT" worktree add -b "$BRANCH" "$WT" main >/dev/null
 
+  RERUN_NOTE=""
+  if [[ "$NOT_FIXED" == "true" ]]; then
+    RERUN_NOTE=$(cat <<EOF
+⚠ これは **再対応** のリクエストです（\`$NOT_FIXED_LABEL\` ラベルが付いている）。
+前回の対応で問題が解決しなかったというユーザーの判断。過去コメントの末尾（特に \`$DONE_IMPL_LABEL\` / \`$DONE_RESEARCH_LABEL\` 以降のユーザー FB）を**最優先**で読み、前回と同じ変更を繰り返すのではなく、足りなかった点・誤っていた点にフォーカスすること。
+
+EOF
+)
+  fi
+
   if [[ "$MODE" == "research" ]]; then
     FINDINGS_PATH="$WT/RESEARCH_FINDINGS.md"
     PROMPT=$(cat <<EOF
 GitHub Issue #$NUM の**調査のみ**をお願いします。コード変更は禁止です。
 
-URL: $URL
+${RERUN_NOTE}URL: $URL
 Title: $TITLE
 
 Body:
 $BODY
+
+Comments (過去の調査結果・自動実装履歴・ユーザー FB 含む):
+${COMMENTS:-(コメントなし)}
 
 手順:
 1. issueの質問・調査依頼の意図を把握する。
@@ -225,7 +271,7 @@ EOF
     PROMPT=$(cat <<EOF
 GitHub Issue #$NUM の実装をお願いします。
 
-URL: $URL
+${RERUN_NOTE}URL: $URL
 Title: $TITLE
 
 Body:
@@ -281,8 +327,12 @@ EOF
 
   if [[ "$MODE" == "research" ]]; then
     if [[ "$RESULT_LINE" == AUTO_RESULT:\ RESEARCHED* && -s "$FINDINGS_PATH" ]]; then
-      COMMENT=$(printf '🔍 Auto-researched by `scripts/auto_implement_issues.sh`.\n\n---\n\n%s\n' \
-        "$(cat "$FINDINGS_PATH")")
+      if [[ "$NOT_FIXED" == "true" ]]; then
+        HEADER="🔁 Auto re-researched by \`scripts/auto_implement_issues.sh\` (\`$NOT_FIXED_LABEL\` → \`$NEED_CONFIRM_LABEL\`)."
+      else
+        HEADER="🔍 Auto-researched by \`scripts/auto_implement_issues.sh\`."
+      fi
+      COMMENT=$(printf '%s\n\n---\n\n%s\n' "$HEADER" "$(cat "$FINDINGS_PATH")")
       if gh issue comment "$NUM" --body "$COMMENT" >/dev/null 2>&1; then
         echo "  posted findings to issue #$NUM"
       else
@@ -292,6 +342,13 @@ EOF
         echo "  labeled issue #$NUM: $DONE_RESEARCH_LABEL"
       else
         echo "  WARN: failed to add label $DONE_RESEARCH_LABEL to issue #$NUM"
+      fi
+      if [[ "$NOT_FIXED" == "true" ]]; then
+        if gh issue edit "$NUM" --add-label "$NEED_CONFIRM_LABEL" --remove-label "$NOT_FIXED_LABEL" >/dev/null 2>&1; then
+          echo "  labeled issue #$NUM: +$NEED_CONFIRM_LABEL -$NOT_FIXED_LABEL"
+        else
+          echo "  WARN: failed to transition $NOT_FIXED_LABEL → $NEED_CONFIRM_LABEL on issue #$NUM"
+        fi
       fi
       SUCCEEDED+=("#$NUM [research] findings posted")
       # Research mode should leave no commits and no local edits. Respect that:
@@ -345,8 +402,13 @@ EOF
         fi
       fi
 
+      if [[ "$NOT_FIXED" == "true" ]]; then
+        COMMENT_HEADER="🔁 Auto re-implemented by \`scripts/auto_implement_issues.sh\` (\`$NOT_FIXED_LABEL\` → \`$NEED_CONFIRM_LABEL\`)."
+      else
+        COMMENT_HEADER="🤖 Auto-implemented by \`scripts/auto_implement_issues.sh\`."
+      fi
       COMMENT=$(cat <<COMMENT_EOF
-🤖 Auto-implemented by \`scripts/auto_implement_issues.sh\`.
+$COMMENT_HEADER
 
 - branch: \`$BRANCH\`
 - commit: \`${SHA:0:7}\` — $SUBJECT
@@ -365,6 +427,13 @@ COMMENT_EOF
         echo "  labeled issue #$NUM: $DONE_IMPL_LABEL"
       else
         echo "  WARN: failed to add label $DONE_IMPL_LABEL to issue #$NUM"
+      fi
+      if [[ "$NOT_FIXED" == "true" ]]; then
+        if gh issue edit "$NUM" --add-label "$NEED_CONFIRM_LABEL" --remove-label "$NOT_FIXED_LABEL" >/dev/null 2>&1; then
+          echo "  labeled issue #$NUM: +$NEED_CONFIRM_LABEL -$NOT_FIXED_LABEL"
+        else
+          echo "  WARN: failed to transition $NOT_FIXED_LABEL → $NEED_CONFIRM_LABEL on issue #$NUM"
+        fi
       fi
       SUCCEEDED+=("#$NUM [impl] $RESULT_LINE")
     fi
