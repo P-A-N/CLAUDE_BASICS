@@ -5,15 +5,20 @@
 #   scripts/auto_implement_issues.sh [--impl-label auto-ok] [--research-label research]
 #                                    [--limit 5] [--budget 5] [--dry-run]
 #
-# Modes (chosen per issue from its labels):
+# Modes (chosen per issue from its labels / state):
 #   * research label → investigate only, post findings as comment, mark "auto-researched"
 #   * impl label     → implement, run /codex-review until APPROVED, commit on auto/issue-N
 #                      branch, comment on issue, mark "auto-implemented" (no merge, no push)
 #   * both labels    → research mode wins (safer: no code changes)
+#   * no label (untriaged) → also picked up in implement mode when there are no
+#                      comments yet, OR the last comment isn't one of this
+#                      script's own bot markers (i.e. the user is waiting on a
+#                      response). auto-ok を必須にしない運用。
 #
 # Safety:
-#   - Only issues carrying impl/research label are picked up
 #   - Already-done issues (auto-implemented / auto-researched) are excluded
+#   - Untriaged path skips issues whose last comment is a bot marker — only
+#     re-engages once a real user comment is the latest
 #   - Never pushes, never merges to main
 #   - --budget caps per-issue Claude spend in USD (default 5)
 
@@ -91,7 +96,7 @@ else
   # Fetch label sets, tag with mode, dedupe (research wins when both present).
   # Also pull "not-fixed" issues regardless of done-label so the user can
   # request a re-run by adding the not-fixed label.
-  echo "Fetching issues: impl=$IMPL_LABEL, research=$RESEARCH_LABEL, re-run=$NOT_FIXED_LABEL (limit=$LIMIT each)..."
+  echo "Fetching issues: impl=$IMPL_LABEL, research=$RESEARCH_LABEL, re-run=$NOT_FIXED_LABEL, untriaged=any (limit=$LIMIT each)..."
   NF_JQ='[.[] | . + {not_fixed: ([.labels[].name] | index("'"$NOT_FIXED_LABEL"'") != null)}]'
   RESEARCH_ISSUES=$(gh issue list --state open --limit "$LIMIT" \
     --search "label:$RESEARCH_LABEL -label:$DONE_RESEARCH_LABEL" \
@@ -109,14 +114,37 @@ else
     --search "label:$IMPL_LABEL label:$NOT_FIXED_LABEL label:$DONE_IMPL_LABEL" \
     --json number,title,url,body,labels \
     | jq '[.[] | . + {mode:"implement", not_fixed:true}]')
-  # Priority order: standard research → standard impl → re-run impl → re-run research.
-  # Puts implement-mode re-runs ahead of research-mode re-runs when the issue
-  # was previously implemented, so we re-attempt the fix rather than drop back
-  # to research. unique_by keeps the first occurrence.
+  # Untriaged: open issues without any of our pipeline labels. Pick up in
+  # implement mode when no comments exist yet, or the last comment isn't one
+  # of this script's bot markers (the user is waiting on a response).
+  UNTRIAGED_RAW=$(gh issue list --state open --limit "$LIMIT" \
+    --search "-label:$IMPL_LABEL -label:$RESEARCH_LABEL -label:$DONE_IMPL_LABEL -label:$DONE_RESEARCH_LABEL -label:$NOT_FIXED_LABEL" \
+    --json number,title,url,body,labels)
+  UNTRIAGED_KEEP=()
+  for unum in $(jq -r '.[].number' <<<"$UNTRIAGED_RAW"); do
+    LAST_BODY=$(gh issue view "$unum" --json comments \
+      --jq '.comments | (last | .body // "")' 2>/dev/null || echo "")
+    if [[ "$LAST_BODY" == *"by \`scripts/auto_implement_issues.sh\`"* ]]; then
+      continue
+    fi
+    UNTRIAGED_KEEP+=("$unum")
+  done
+  if [[ "${#UNTRIAGED_KEEP[@]}" -gt 0 ]]; then
+    UNTRIAGED_KEEP_JSON="[$(IFS=,; echo "${UNTRIAGED_KEEP[*]}")]"
+  else
+    UNTRIAGED_KEEP_JSON='[]'
+  fi
+  UNTRIAGED_ISSUES=$(jq --argjson keep "$UNTRIAGED_KEEP_JSON" \
+    '[.[] | select(.number as $n | $keep | index($n)) | . + {mode:"implement", not_fixed:false}]' \
+    <<<"$UNTRIAGED_RAW")
+  # Priority order: standard research → standard impl → re-run impl → re-run
+  # research → untriaged. Untriaged is last so explicit-label intents win when
+  # the same issue would match both (unique_by keeps the first occurrence).
   ISSUES=$(jq -s --argjson lim "$LIMIT" \
-    '(.[0] + .[1] + .[2] + .[3]) | unique_by(.number) | .[:$lim]' \
+    '(.[0] + .[1] + .[2] + .[3] + .[4]) | unique_by(.number) | .[:$lim]' \
     <(echo "$RESEARCH_ISSUES") <(echo "$IMPL_ISSUES") \
-    <(echo "$NF_IMPL_ISSUES") <(echo "$NF_RESEARCH_ISSUES"))
+    <(echo "$NF_IMPL_ISSUES") <(echo "$NF_RESEARCH_ISSUES") \
+    <(echo "$UNTRIAGED_ISSUES"))
 fi
 COUNT=$(jq 'length' <<<"$ISSUES")
 echo "Found $COUNT issue(s)"
