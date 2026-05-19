@@ -6,32 +6,33 @@
 #                                    [--limit 5] [--budget 5] [--dry-run]
 #
 # Modes (chosen per issue from its labels / state):
-#   * research label → investigate only, post findings as comment, mark "auto-researched"
-#   * impl label     → implement, run /codex-review until APPROVED, commit on auto/issue-N
-#                      branch, comment on issue, mark "auto-implemented" (no merge, no push)
+#   * research label → investigate only, post findings as comment
+#   * impl label     → implement, run /codex-review until APPROVED, commit on
+#                      auto/issue-N branch, comment on issue (no push)
 #   * both labels    → research mode wins (safer: no code changes)
-#   * no label (untriaged) → also picked up in implement mode when there are no
-#                      comments yet, OR the last comment isn't one of this
-#                      script's own bot markers (i.e. the user is waiting on a
-#                      response). auto-ok を必須にしない運用。
+#   * no label (untriaged) → also picked up in implement mode (auto-ok を必須にしない運用)
+#
+# Eligibility (uniform across all paths):
+#   - Issues whose LAST comment is one this script posted are skipped. A new
+#     comment from anyone else re-arms the issue. The script never adds or
+#     removes labels — the label vocabulary stays fully user-managed.
 #
 # Safety:
-#   - Already-done issues (auto-implemented / auto-researched) are excluded
-#   - Untriaged path skips issues whose last comment is a bot marker — only
-#     re-engages once a real user comment is the latest
-#   - Never pushes, never merges to main
-#   - --budget caps per-issue Claude spend in USD (default 5)
+#   - Never pushes; auto-merges APPROVED implement branches into main locally
+#     (override with --no-auto-merge)
+#   - --budget caps per-issue Claude spend in USD (default 0 = no cap; pass any
+#     positive number to enforce a ceiling, e.g. --budget 5)
 
 set -euo pipefail
 
 IMPL_LABEL="auto-ok"
 RESEARCH_LABEL="research"
-DONE_IMPL_LABEL="auto-implemented"
-DONE_RESEARCH_LABEL="auto-researched"
 NOT_FIXED_LABEL="not-fixed"
-NEED_CONFIRM_LABEL="need-confirm"
+# Marker every auto-posted comment contains, so the next run can detect its
+# own prior work via the latest-comment check without touching labels.
+SCRIPT_COMMENT_MARKER="scripts/auto_implement_issues.sh"
 LIMIT=5
-BUDGET=5
+BUDGET=0   # 0 = no per-issue budget cap; pass --budget N to enforce a ceiling.
 DRY_RUN=0
 TARGET_ISSUE=""
 AUTO_MERGE=1
@@ -65,27 +66,28 @@ WT_ROOT="$REPO_ROOT/.worktrees"
 LOG_DIR="$WT_ROOT/.auto_logs"
 mkdir -p "$LOG_DIR"
 
-gh label create "$DONE_IMPL_LABEL"     --color 0E8A16 \
-  --description "Auto-implemented by scripts/auto_implement_issues.sh" >/dev/null 2>&1 || true
-gh label create "$DONE_RESEARCH_LABEL" --color 1D76DB \
-  --description "Auto-researched by scripts/auto_implement_issues.sh" >/dev/null 2>&1 || true
-gh label create "$NEED_CONFIRM_LABEL"  --color FBCA04 \
-  --description "Auto re-run completed; awaiting user verification" >/dev/null 2>&1 || true
+# Returns "true" when issue $1's latest comment was posted by this script.
+# Used uniformly across all search arms to skip already-processed issues
+# without touching labels. The script's own comments include
+# SCRIPT_COMMENT_MARKER (the path "scripts/auto_implement_issues.sh") in
+# every header, so a plain substring match is enough.
+_last_comment_is_script() {
+  local num="$1"
+  local body
+  body=$(gh issue view "$num" --json comments \
+    --jq '.comments | (last | .body // "")' 2>/dev/null || echo "")
+  if [[ -z "$body" ]]; then echo "false"; return 0; fi
+  if grep -qF "$SCRIPT_COMMENT_MARKER" <<<"$body"; then echo "true"; else echo "false"; fi
+}
 
 if [[ -n "$TARGET_ISSUE" ]]; then
+  # Single-issue mode: bypass the latest-comment filter — the caller explicitly
+  # asked for this one, so honor it without requiring a fresh user comment.
   echo "Fetching single issue #$TARGET_ISSUE..."
   RAW=$(gh issue view "$TARGET_ISSUE" --json number,title,url,body,labels)
   HAS_RESEARCH=$(jq --arg L "$RESEARCH_LABEL" '[.labels[].name] | index($L) != null' <<<"$RAW")
-  HAS_DONE_RESEARCH=$(jq --arg L "$DONE_RESEARCH_LABEL" '[.labels[].name] | index($L) != null' <<<"$RAW")
-  HAS_DONE_IMPL=$(jq --arg L "$DONE_IMPL_LABEL" '[.labels[].name] | index($L) != null' <<<"$RAW")
   HAS_NOT_FIXED=$(jq --arg L "$NOT_FIXED_LABEL" '[.labels[].name] | index($L) != null' <<<"$RAW")
-  if [[ "$HAS_NOT_FIXED" == "true" && "$HAS_DONE_IMPL" == "true" ]]; then
-    # Re-run requested for an already-implemented issue
-    MODE_FORCED="implement"
-  elif [[ "$HAS_NOT_FIXED" == "true" && "$HAS_DONE_RESEARCH" == "true" ]]; then
-    # Re-run requested for a previously-researched-only issue
-    MODE_FORCED="research"
-  elif [[ "$HAS_RESEARCH" == "true" && "$HAS_DONE_RESEARCH" == "false" ]]; then
+  if [[ "$HAS_RESEARCH" == "true" ]]; then
     MODE_FORCED="research"
   else
     MODE_FORCED="implement"
@@ -93,58 +95,43 @@ if [[ -n "$TARGET_ISSUE" ]]; then
   ISSUES=$(jq --arg m "$MODE_FORCED" --argjson nf "$HAS_NOT_FIXED" \
     '[{number, title, url, body, mode:$m, not_fixed:$nf}]' <<<"$RAW")
 else
-  # Fetch label sets, tag with mode, dedupe (research wins when both present).
-  # Also pull "not-fixed" issues regardless of done-label so the user can
-  # request a re-run by adding the not-fixed label.
-  echo "Fetching issues: impl=$IMPL_LABEL, research=$RESEARCH_LABEL, re-run=$NOT_FIXED_LABEL, untriaged=any (limit=$LIMIT each)..."
+  # Fetch by input label + an untriaged sweep. Tag each with its mode and
+  # whether the not-fixed label is also present (purely informational — the
+  # script does not transition labels). The latest-comment filter below
+  # decides eligibility uniformly, so we no longer need the old NF_* re-run
+  # arms or done-label exclusions.
+  echo "Fetching issues: impl=$IMPL_LABEL, research=$RESEARCH_LABEL, untriaged=any (limit=$LIMIT each)..."
   NF_JQ='[.[] | . + {not_fixed: ([.labels[].name] | index("'"$NOT_FIXED_LABEL"'") != null)}]'
   RESEARCH_ISSUES=$(gh issue list --state open --limit "$LIMIT" \
-    --search "label:$RESEARCH_LABEL -label:$DONE_RESEARCH_LABEL" \
+    --search "label:$RESEARCH_LABEL" \
     --json number,title,url,body,labels \
     | jq "$NF_JQ"' | [.[] | . + {mode:"research"}]')
   IMPL_ISSUES=$(gh issue list --state open --limit "$LIMIT" \
-    --search "label:$IMPL_LABEL -label:$DONE_IMPL_LABEL" \
+    --search "label:$IMPL_LABEL" \
     --json number,title,url,body,labels \
     | jq "$NF_JQ"' | [.[] | . + {mode:"implement"}]')
-  NF_RESEARCH_ISSUES=$(gh issue list --state open --limit "$LIMIT" \
-    --search "label:$RESEARCH_LABEL label:$NOT_FIXED_LABEL label:$DONE_RESEARCH_LABEL -label:$DONE_IMPL_LABEL" \
+  UNTRIAGED_ISSUES=$(gh issue list --state open --limit "$LIMIT" \
+    --search "-label:$IMPL_LABEL -label:$RESEARCH_LABEL" \
     --json number,title,url,body,labels \
-    | jq '[.[] | . + {mode:"research", not_fixed:true}]')
-  NF_IMPL_ISSUES=$(gh issue list --state open --limit "$LIMIT" \
-    --search "label:$IMPL_LABEL label:$NOT_FIXED_LABEL label:$DONE_IMPL_LABEL" \
-    --json number,title,url,body,labels \
-    | jq '[.[] | . + {mode:"implement", not_fixed:true}]')
-  # Untriaged: open issues without any of our pipeline labels. Pick up in
-  # implement mode when no comments exist yet, or the last comment isn't one
-  # of this script's bot markers (the user is waiting on a response).
-  UNTRIAGED_RAW=$(gh issue list --state open --limit "$LIMIT" \
-    --search "-label:$IMPL_LABEL -label:$RESEARCH_LABEL -label:$DONE_IMPL_LABEL -label:$DONE_RESEARCH_LABEL -label:$NOT_FIXED_LABEL" \
-    --json number,title,url,body,labels)
-  UNTRIAGED_KEEP=()
-  for unum in $(jq -r '.[].number' <<<"$UNTRIAGED_RAW"); do
-    LAST_BODY=$(gh issue view "$unum" --json comments \
-      --jq '.comments | (last | .body // "")' 2>/dev/null || echo "")
-    if [[ "$LAST_BODY" == *"by \`scripts/auto_implement_issues.sh\`"* ]]; then
+    | jq "$NF_JQ"' | [.[] | . + {mode:"implement"}]')
+  # Priority: research → impl → untriaged. Research wins when both labels are
+  # set; explicit-label intents beat the catch-all untriaged sweep.
+  ALL_ISSUES=$(jq -s '(.[0] + .[1] + .[2]) | unique_by(.number)' \
+    <(echo "$RESEARCH_ISSUES") <(echo "$IMPL_ISSUES") <(echo "$UNTRIAGED_ISSUES"))
+  # Apply the uniform last-comment filter across every path.
+  PRE_COUNT=$(jq 'length' <<<"$ALL_ISSUES")
+  KEPT="[]"
+  for k in $(seq 0 $((PRE_COUNT-1))); do
+    [[ "$PRE_COUNT" -eq 0 ]] && break
+    CUR=$(jq ".[$k]" <<<"$ALL_ISSUES")
+    CUR_NUM=$(jq -r '.number' <<<"$CUR")
+    if [[ "$(_last_comment_is_script "$CUR_NUM")" == "true" ]]; then
+      echo "  skipping #$CUR_NUM: last comment is from this script (add a new comment to re-trigger)"
       continue
     fi
-    UNTRIAGED_KEEP+=("$unum")
+    KEPT=$(jq --argjson c "$CUR" '. + [$c]' <<<"$KEPT")
   done
-  if [[ "${#UNTRIAGED_KEEP[@]}" -gt 0 ]]; then
-    UNTRIAGED_KEEP_JSON="[$(IFS=,; echo "${UNTRIAGED_KEEP[*]}")]"
-  else
-    UNTRIAGED_KEEP_JSON='[]'
-  fi
-  UNTRIAGED_ISSUES=$(jq --argjson keep "$UNTRIAGED_KEEP_JSON" \
-    '[.[] | select(.number as $n | $keep | index($n)) | . + {mode:"implement", not_fixed:false}]' \
-    <<<"$UNTRIAGED_RAW")
-  # Priority order: standard research → standard impl → re-run impl → re-run
-  # research → untriaged. Untriaged is last so explicit-label intents win when
-  # the same issue would match both (unique_by keeps the first occurrence).
-  ISSUES=$(jq -s --argjson lim "$LIMIT" \
-    '(.[0] + .[1] + .[2] + .[3] + .[4]) | unique_by(.number) | .[:$lim]' \
-    <(echo "$RESEARCH_ISSUES") <(echo "$IMPL_ISSUES") \
-    <(echo "$NF_IMPL_ISSUES") <(echo "$NF_RESEARCH_ISSUES") \
-    <(echo "$UNTRIAGED_ISSUES"))
+  ISSUES=$(jq --argjson lim "$LIMIT" '.[:$lim]' <<<"$KEPT")
 fi
 COUNT=$(jq 'length' <<<"$ISSUES")
 echo "Found $COUNT issue(s)"
@@ -255,7 +242,7 @@ for i in $(seq 0 $((COUNT-1))); do
   if [[ "$NOT_FIXED" == "true" ]]; then
     RERUN_NOTE=$(cat <<EOF
 ⚠ これは **再対応** のリクエストです（\`$NOT_FIXED_LABEL\` ラベルが付いている）。
-前回の対応で問題が解決しなかったというユーザーの判断。過去コメントの末尾（特に \`$DONE_IMPL_LABEL\` / \`$DONE_RESEARCH_LABEL\` 以降のユーザー FB）を**最優先**で読み、前回と同じ変更を繰り返すのではなく、足りなかった点・誤っていた点にフォーカスすること。
+前回の対応で問題が解決しなかったというユーザーの判断。直近のユーザー FB を**最優先**で読み、前回と同じ変更を繰り返すのではなく、足りなかった点・誤っていた点にフォーカスすること。
 
 EOF
 )
@@ -336,17 +323,29 @@ EOF
 )
   fi
 
-  echo "  launching Claude (mode=$MODE, budget=\$$BUDGET, log=$LOG)"
+  if [[ "$BUDGET" == "0" ]]; then
+    echo "  launching Claude (mode=$MODE, budget=unlimited, log=$LOG)"
+  else
+    echo "  launching Claude (mode=$MODE, budget=\$$BUDGET, log=$LOG)"
+  fi
   # Feed the prompt via stdin instead of argv. On Windows/MSYS, argv has a hard
   # ~32 KiB cap (CreateProcess) and long prompts trip `execve: E2BIG` before the
   # CLI even starts (rc=126). Bash's `<<<` materializes the here-string through
   # a temp file, so stdin avoids the limit entirely.
   set +e
-  ( cd "$WT" && claude -p \
-      --dangerously-skip-permissions \
-      --max-budget-usd "$BUDGET" \
-      <<<"$PROMPT"
-  ) >"$LOG" 2>&1
+  if [[ "$BUDGET" == "0" ]]; then
+    # Omit --max-budget-usd so the claude CLI runs without a spend ceiling.
+    ( cd "$WT" && claude -p \
+        --dangerously-skip-permissions \
+        <<<"$PROMPT"
+    ) >"$LOG" 2>&1
+  else
+    ( cd "$WT" && claude -p \
+        --dangerously-skip-permissions \
+        --max-budget-usd "$BUDGET" \
+        <<<"$PROMPT"
+    ) >"$LOG" 2>&1
+  fi
   RC=$?
   set -e
 
@@ -361,27 +360,18 @@ EOF
   if [[ "$MODE" == "research" ]]; then
     if [[ "$RESULT_LINE" == AUTO_RESULT:\ RESEARCHED* && -s "$FINDINGS_PATH" ]]; then
       if [[ "$NOT_FIXED" == "true" ]]; then
-        HEADER="🔁 Auto re-researched by \`scripts/auto_implement_issues.sh\` (\`$NOT_FIXED_LABEL\` → \`$NEED_CONFIRM_LABEL\`)."
+        HEADER="🔁 Auto re-researched by \`scripts/auto_implement_issues.sh\` (\`$NOT_FIXED_LABEL\` was set; label left untouched)."
       else
         HEADER="🔍 Auto-researched by \`scripts/auto_implement_issues.sh\`."
       fi
       COMMENT=$(printf '%s\n\n---\n\n%s\n' "$HEADER" "$(cat "$FINDINGS_PATH")")
+      # The header contains SCRIPT_COMMENT_MARKER, so the next run's
+      # _last_comment_is_script filter skips this issue until the user posts a
+      # fresh comment. The script never adds or removes labels.
       if gh issue comment "$NUM" --body "$COMMENT" >/dev/null 2>&1; then
         echo "  posted findings to issue #$NUM"
       else
         echo "  WARN: failed to post findings to issue #$NUM"
-      fi
-      if gh issue edit "$NUM" --add-label "$DONE_RESEARCH_LABEL" >/dev/null 2>&1; then
-        echo "  labeled issue #$NUM: $DONE_RESEARCH_LABEL"
-      else
-        echo "  WARN: failed to add label $DONE_RESEARCH_LABEL to issue #$NUM"
-      fi
-      if [[ "$NOT_FIXED" == "true" ]]; then
-        if gh issue edit "$NUM" --add-label "$NEED_CONFIRM_LABEL" --remove-label "$NOT_FIXED_LABEL" >/dev/null 2>&1; then
-          echo "  labeled issue #$NUM: +$NEED_CONFIRM_LABEL -$NOT_FIXED_LABEL"
-        else
-          echo "  WARN: failed to transition $NOT_FIXED_LABEL → $NEED_CONFIRM_LABEL on issue #$NUM"
-        fi
       fi
       SUCCEEDED+=("#$NUM [research] findings posted")
       # Research mode should leave no commits and no local edits. Respect that:
@@ -436,7 +426,7 @@ EOF
       fi
 
       if [[ "$NOT_FIXED" == "true" ]]; then
-        COMMENT_HEADER="🔁 Auto re-implemented by \`scripts/auto_implement_issues.sh\` (\`$NOT_FIXED_LABEL\` → \`$NEED_CONFIRM_LABEL\`)."
+        COMMENT_HEADER="🔁 Auto re-implemented by \`scripts/auto_implement_issues.sh\` (\`$NOT_FIXED_LABEL\` was set; label left untouched)."
       else
         COMMENT_HEADER="🤖 Auto-implemented by \`scripts/auto_implement_issues.sh\`."
       fi
@@ -448,25 +438,15 @@ $COMMENT_HEADER
 - codex review: ✅ APPROVED — $CODEX_MSG
 - merge: $MERGE_STATUS
 
-Push は手動で。
+Push は手動で。次回 \`auto_implement_issues.sh\` が走ったときにこの issue を再処理させたい場合は、新しいコメントを追加してください（自動コメントが「最後のコメント」のままだと skip されます）。
 COMMENT_EOF
 )
+      # Header contains SCRIPT_COMMENT_MARKER → next run skips this issue
+      # until the user posts a fresh comment. No label mutation.
       if gh issue comment "$NUM" --body "$COMMENT" >/dev/null 2>&1; then
         echo "  posted comment to issue #$NUM"
       else
         echo "  WARN: failed to post comment to issue #$NUM"
-      fi
-      if gh issue edit "$NUM" --add-label "$DONE_IMPL_LABEL" >/dev/null 2>&1; then
-        echo "  labeled issue #$NUM: $DONE_IMPL_LABEL"
-      else
-        echo "  WARN: failed to add label $DONE_IMPL_LABEL to issue #$NUM"
-      fi
-      if [[ "$NOT_FIXED" == "true" ]]; then
-        if gh issue edit "$NUM" --add-label "$NEED_CONFIRM_LABEL" --remove-label "$NOT_FIXED_LABEL" >/dev/null 2>&1; then
-          echo "  labeled issue #$NUM: +$NEED_CONFIRM_LABEL -$NOT_FIXED_LABEL"
-        else
-          echo "  WARN: failed to transition $NOT_FIXED_LABEL → $NEED_CONFIRM_LABEL on issue #$NUM"
-        fi
       fi
       SUCCEEDED+=("#$NUM [impl] $RESULT_LINE")
     fi
