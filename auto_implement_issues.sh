@@ -326,11 +326,16 @@ ${COMMENTS:-(コメントなし)}
 手順:
 1. issue内容と過去コメントを読んで変更範囲を特定する。関係ないファイルの変更は一切しない。
 2. 要求が曖昧、または制約を満たせない場合は、コード変更せず最後に一行 "AUTO_RESULT: SKIP <理由>" とだけ出力して終了する。
-3. 実装したら /codex-review skill を**必ず**呼ぶ。APPROVED が出るまで修正をループする（最大5ラウンド）。
-4. /codex-review の各ラウンド終了時に、Codex の verdict 要約を一行 "CODEX_ROUND <n>: <APPROVED|CHANGES_REQUESTED|...> - <要約>" で出力する。
-5. 最終的に APPROVED になったら、approval文の最初の一行をそのまま "CODEX_APPROVED: <Codexの一言>" として出力する。APPROVED に到達できなかったら "AUTO_RESULT: NO_APPROVAL <理由>" を出して終了（コミットしない）。
-6. APPROVED 後、プロジェクトの規約（CLAUDE.md / AGENTS.md / CONTRIBUTING.md 等、存在するもの）に従って現在のブランチ ($BRANCH) に commit する。
-7. **commit 前** に必ず \`IMPLEMENTATION_NOTES.md\` を worktree root に作成すること。テンプレ:
+3. 実装したらまず \`IMPLEMENTATION_NOTES.md\` を worktree root に作成する（テンプレは下記）。codex-review で軽微な diff が増えても上書きすれば良い。
+4. /codex-review skill を**必ず**呼ぶ。APPROVED が出るまで修正をループする（最大5ラウンド）。
+5. /codex-review の各ラウンド終了時に、Codex の verdict 要約を一行 "CODEX_ROUND <n>: <APPROVED|CHANGES_REQUESTED|...> - <要約>" で出力する。
+6. **APPROVED が返ったら、即座に commit する**（プロジェクトの規約 CLAUDE.md / AGENTS.md / CONTRIBUTING.md 等に従い、現在のブランチ \`$BRANCH\` 上で）。
+   - **重要**: APPROVED と commit の間に追加の確認 / 再 review / 再読 / 詳細説明・要約のドラフト等は一切しない。commit を**最優先のアクション**として実行する。説明や IMPLEMENTATION_NOTES.md の補強が必要なら commit 後に行う。
+   - 過去に APPROVED 後ハングして commit せず claude プロセスが kill された事故があった (issue #19)。commit していれば最悪 main にマージできるので、まず commit。
+   - approval文の最初の一行をそのまま "CODEX_APPROVED: <Codexの一言>" として最終メッセージに出力する。
+   - APPROVED に到達できなかったら "AUTO_RESULT: NO_APPROVAL <理由>" を出して終了（コミットしない）。
+
+\`IMPLEMENTATION_NOTES.md\` テンプレ:
 
    \`\`\`markdown
    ## 実装概要
@@ -360,13 +365,16 @@ ${COMMENTS:-(コメントなし)}
 
    この MD は autoimplement が issue へのコメントに**そのまま貼り付ける**ので、レビュワー視点で必要十分・嘘なしで書くこと（推測ではなく実際に diff/コミットに入った変更だけ書く）。
    **このファイルは commit には絶対に含めないこと** — 各実装ごとに上書きされる一時ファイル扱い。プロジェクトの \`.gitignore\` に \`IMPLEMENTATION_NOTES.md\` を入れておくと安心 (まだ無ければ追加して別 commit にしておく)。script は worktree のファイルをそのまま読む。
-8. main へのマージや push は絶対にしない。ユーザーが後で手動で行う。
-9. 完了したら**最終 assistant メッセージに必ず**以下を含めて終了する（-p モードは途中出力を捨てるため、途中で書いても意味がない。必ず最後のメッセージに書く）:
+
+7. main へのマージや push は絶対にしない。ユーザーが後で手動で行う。
+8. 完了したら**最終 assistant メッセージに必ず**以下を含めて終了する（-p モードは途中出力を捨てるため、途中で書いても意味がない。必ず最後のメッセージに書く）:
    - "CODEX_ROUND <n>: ..." 行（ラウンド数分）
    - "CODEX_APPROVED: ..." 行
    - "AUTO_RESULT: DONE <commit-sha>" 行
 
-重要: /codex-review を実行せずに commit するのは禁止。最終メッセージに CODEX_APPROVED 行が無い＝失敗扱いでマージされない。
+重要:
+- /codex-review を実行せずに commit するのは禁止。最終メッセージに CODEX_APPROVED 行が無い＝失敗扱いでマージされない。
+- 逆に **/codex-review が APPROVED を返したのに commit していない**状態でメッセージを終わらせるのも禁止。APPROVED 直後に **commit を最優先**で実行すること。途中で claude プロセスが kill されても commit してあれば実装はロストしない。
 
 作業ディレクトリは既に worktree ($WT / branch $BRANCH) に入った状態で起動されている。
 EOF
