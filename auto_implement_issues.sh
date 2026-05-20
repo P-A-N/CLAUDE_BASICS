@@ -310,8 +310,38 @@ ${COMMENTS:-(コメントなし)}
 4. /codex-review の各ラウンド終了時に、Codex の verdict 要約を一行 "CODEX_ROUND <n>: <APPROVED|CHANGES_REQUESTED|...> - <要約>" で出力する。
 5. 最終的に APPROVED になったら、approval文の最初の一行をそのまま "CODEX_APPROVED: <Codexの一言>" として出力する。APPROVED に到達できなかったら "AUTO_RESULT: NO_APPROVAL <理由>" を出して終了（コミットしない）。
 6. APPROVED 後、プロジェクトの規約（CLAUDE.md / AGENTS.md / CONTRIBUTING.md 等、存在するもの）に従って現在のブランチ ($BRANCH) に commit する。
-7. main へのマージや push は絶対にしない。ユーザーが後で手動で行う。
-8. 完了したら**最終 assistant メッセージに必ず**以下を含めて終了する（-p モードは途中出力を捨てるため、途中で書いても意味がない。必ず最後のメッセージに書く）:
+7. **commit 前** に必ず \`IMPLEMENTATION_NOTES.md\` を worktree root に作成すること。テンプレ:
+
+   \`\`\`markdown
+   ## 実装概要
+   <1-3行で何をどう変えたかの要約>
+
+   ## 追加ファイル
+   - \`path/to/new.cs\`: 何のためのファイルか
+   - (なし の場合は「なし」と書く)
+
+   ## 修正ファイル
+   - \`path/to/existing.cs\`: 何をどう変えたか
+   - …
+
+   ## 追加 GameObject (Hierarchy)
+   - \`/Foo/Bar\`: 何のため、どこに置いたか
+   - (なし の場合は「なし」)
+
+   ## 修正 GameObject (Hierarchy)
+   - \`/Existing/Thing\`: どの Inspector 値 / コンポーネント / 子を変えたか
+   - (なし の場合は「なし」)
+
+   ## 動作確認方法
+   1. (Editor で何を Play / Inspector でどう操作する)
+   2. (何が起きれば成功か。期待値を具体的に)
+   3. (失敗時の典型症状)
+   \`\`\`
+
+   この MD は autoimplement が issue へのコメントに**そのまま貼り付ける**ので、レビュワー視点で必要十分・嘘なしで書くこと（推測ではなく実際に diff/コミットに入った変更だけ書く）。
+   このファイルは commit に含めても良いし含めなくても良い (.gitignore 状況による) — どちらでも script は worktree から読む。
+8. main へのマージや push は絶対にしない。ユーザーが後で手動で行う。
+9. 完了したら**最終 assistant メッセージに必ず**以下を含めて終了する（-p モードは途中出力を捨てるため、途中で書いても意味がない。必ず最後のメッセージに書く）:
    - "CODEX_ROUND <n>: ..." 行（ラウンド数分）
    - "CODEX_APPROVED: ..." 行
    - "AUTO_RESULT: DONE <commit-sha>" 行
@@ -405,6 +435,16 @@ EOF
       CODEX_MSG=${APPROVED_LINE#CODEX_APPROVED: }
       SUBJECT=$(git -C "$WT" log -1 --pretty=%s "$SHA" 2>/dev/null || echo "$TITLE")
 
+      # Capture IMPLEMENTATION_NOTES.md NOW — a successful auto-merge below
+      # removes the worktree, so reading later would race with cleanup. If the
+      # implementer wrote one (it should, per the prompt) the contents go
+      # straight into the issue comment. Falls back to nothing if missing.
+      IMPL_NOTES_PATH="$WT/IMPLEMENTATION_NOTES.md"
+      IMPL_NOTES_BODY=""
+      if [[ -s "$IMPL_NOTES_PATH" ]]; then
+        IMPL_NOTES_BODY=$(cat "$IMPL_NOTES_PATH")
+      fi
+
       MERGE_STATUS="skipped (--no-auto-merge)"
       if [[ "$AUTO_MERGE" == "1" ]]; then
         CUR=$(git -C "$REPO_ROOT" symbolic-ref --short HEAD 2>/dev/null || echo "")
@@ -430,6 +470,11 @@ EOF
       else
         COMMENT_HEADER="🤖 Auto-implemented by \`scripts/auto_implement_issues.sh\`."
       fi
+      if [[ -n "$IMPL_NOTES_BODY" ]]; then
+        IMPL_SECTION=$(printf '\n---\n\n%s\n' "$IMPL_NOTES_BODY")
+      else
+        IMPL_SECTION=$'\n---\n\n⚠ IMPLEMENTATION_NOTES.md が見つかりませんでした — 実装者は次回からこのファイルを worktree root に作成すること (テンプレは auto_implement_issues.sh のプロンプト参照)。\n'
+      fi
       COMMENT=$(cat <<COMMENT_EOF
 $COMMENT_HEADER
 
@@ -439,6 +484,7 @@ $COMMENT_HEADER
 - merge: $MERGE_STATUS
 
 Push は手動で。次回 \`auto_implement_issues.sh\` が走ったときにこの issue を再処理させたい場合は、新しいコメントを追加してください（自動コメントが「最後のコメント」のままだと skip されます）。
+$IMPL_SECTION
 COMMENT_EOF
 )
       # Header contains SCRIPT_COMMENT_MARKER → next run skips this issue
