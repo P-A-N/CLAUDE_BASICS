@@ -68,16 +68,36 @@ mkdir -p "$LOG_DIR"
 
 # Returns "true" when issue $1's latest comment was posted by this script.
 # Used uniformly across all search arms to skip already-processed issues
-# without touching labels. The script's own comments include
-# SCRIPT_COMMENT_MARKER (the path "scripts/auto_implement_issues.sh") in
-# every header, so a plain substring match is enough.
+# without touching labels. Returns "true" when the latest comment on the
+# issue looks like one this script (or an interactive supplement Claude
+# posts on the same workflow) authored.
+#
+# Detection uses ASCII-only substring matches because Git Bash's grep on
+# Windows mis-handles multi-byte UTF-8 in the pattern even with -F. Each
+# matched phrase only ever appears in bot-style headers — false positives
+# on organic user comments are very unlikely:
+#  - "scripts/auto_implement_issues.sh"  → script's standard post
+#  - "Auto-implemented by"               → standard implement comment
+#  - "Auto-researched by"                → standard research comment
+#  - "Auto re-implemented by"            → not-fixed re-run implement
+#  - "Auto re-researched by"             → not-fixed re-run research
+#  - "(autoimplement "                   → Claude's manual supplements
 _last_comment_is_script() {
   local num="$1"
   local body
   body=$(gh issue view "$num" --json comments \
     --jq '.comments | (last | .body // "")' 2>/dev/null || echo "")
   if [[ -z "$body" ]]; then echo "false"; return 0; fi
-  if grep -qF "$SCRIPT_COMMENT_MARKER" <<<"$body"; then echo "true"; else echo "false"; fi
+  # Restrict to the first few hundred bytes so a long user comment that
+  # happens to quote an old bot post deeper down doesn't trigger.
+  local head_body
+  head_body=$(head -c 400 <<<"$body")
+  if grep -qE \
+       "(scripts/auto_implement_issues\.sh|Auto-implemented by|Auto-researched by|Auto re-implemented by|Auto re-researched by|\(autoimplement )" \
+       <<<"$head_body"; then
+    echo "true"; return 0
+  fi
+  echo "false"
 }
 
 if [[ -n "$TARGET_ISSUE" ]]; then
