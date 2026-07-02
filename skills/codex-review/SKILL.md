@@ -46,6 +46,40 @@ node "$COMPANION" setup --json | head -40
 If `setup --json` reports `"ready": false`, stop and surface its `nextSteps`
 (usually `!codex login` or `npm install -g @openai/codex`).
 
+### Step 0b: Stale-runtime recovery (do this FIRST if any Codex call model-gates)
+
+**Symptom**: every `task` call — even with **no `-m`** — fails with
+`400 ... The '<model>' model is not supported when using Codex with a ChatGPT
+account`, or returns `status != 0` with an empty `rawOutput`. This persists across
+`codex login`, `npm install` version changes, and workspace re-login.
+
+**Root cause (observed)**: the companion broker (`app-server-broker.mjs`) keeps a
+long-lived `codex app-server` process alive and **reuses it**. If that server was
+first started under an older/newer codex whose default model (e.g. `gpt-5.3-codex`)
+is not entitled for the account's plan/workspace, the bad default is pinned for the
+life of the process — upgrading/downgrading the `codex` CLI does **not** restart it,
+so the gating error keeps coming back even though the CLI on disk is fine.
+
+**Fix**: kill the stale runtime so the next `task` spawns a fresh app-server:
+
+```bash
+# Show what's running (optional):
+ps aux | grep -E 'codex.*app-server|app-server-broker' | grep -v grep
+# Kill the broker + app-server (portable; ignore "no process" errors):
+pkill -f 'app-server-broker\.mjs' 2>/dev/null
+pkill -f 'codex app-server'      2>/dev/null
+# On Windows/MSYS where pkill is absent, kill by PID from the ps line above:
+#   ps aux | grep -E 'codex.*app-server|app-server-broker' | grep -v grep | awk '{print $2}' | xargs -r kill
+```
+
+Then re-run the failing `task` command once. The companion prints
+`No shared Codex runtime is active yet ... will start one on demand` and the fresh
+server picks up the on-disk codex default, which works. Do **not** downgrade the CLI
+or switch workspaces to chase this — it is a stale-process issue, not an account or
+version issue. (Only if a *fresh* runtime still gates every model is it a real
+account/plan/workspace entitlement problem; then fall back to `!codex login`,
+default-workspace change, or `!codex login --with-api-key`.)
+
 ### Step 1: Generate Session ID
 
 Generate a unique ID to avoid conflicts with other concurrent Claude Code sessions
@@ -140,7 +174,9 @@ If changes are needed, end with exactly: VERDICT: REVISE" \
    same MSYS `/tmp` as the redirect.)
    - If `status` is non-zero or `rawOutput` is empty, the run failed — show the
      `.err` file (often the model-gating 400). If it is the model 400 and you forced
-     a model, retry once without `-m`. Otherwise surface the error and stop.
+     a model, retry once without `-m`. **If it still model-gates with no `-m`, apply
+     Step 0b (stale-runtime recovery: kill the broker + app-server, then retry once)
+     before concluding it is an account problem.** Otherwise surface the error and stop.
 2. Present Codex's review to the user:
 
 ```
