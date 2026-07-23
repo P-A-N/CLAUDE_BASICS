@@ -10,6 +10,8 @@ Claude Code を使った開発でプロジェクト横断的に再利用した�
 | [`claude_basics.md`](./claude_basics.md) | プロジェクト非依存の Claude 作業ルール（基本姿勢）。親 `CLAUDE.md` から参照 / コピーして使う |
 | [`auto_implement_issues.sh`](./auto_implement_issues.sh) | GitHub issue を Claude Code + `/codex-review` で自動実装 / 自動調査するスクリプト |
 | [`skills/autoimplement/SKILL.md`](./skills/autoimplement/) | `auto_implement_issues.sh` を呼び出す Claude Code スキル (`/autoimplement`) |
+| [`setup/install_tools.ps1`](./setup/install_tools.ps1) / [`.sh`](./setup/install_tools.sh) | Python / Node / uv / gh / jq / Claude Code / Codex CLI を一括インストールする |
+| [`setup/install_aliases.ps1`](./setup/install_aliases.ps1) / [`.sh`](./setup/install_aliases.sh) | `cc` シェルショートカット（`claude --dangerously-skip-permissions`）をシェルのプロファイルに登録する |
 
 ## 目的
 
@@ -37,6 +39,66 @@ git commit -m "Add CLAUDE_BASICS as submodule"
 
 - （ここに固有ルール）
 ```
+
+## 新しいマシンのセットアップ
+
+新環境で最初にやること。`setup/` の 2 本を順に流せば、ツール導入と `cc` ショートカット登録が終わる。
+
+### 1. ツールの一括インストール
+
+`git` / `python3` / `node` / `gh` / `jq` / `uv` / `claude` / `codex` を、
+**PATH に無いものだけ** 入れる（Windows は winget、mac/Linux は brew もしくは apt + npm）。
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -File claude-basics\setup\install_tools.ps1 -DryRun   # 確認
+powershell -ExecutionPolicy Bypass -File claude-basics\setup\install_tools.ps1
+```
+
+```bash
+# macOS / Linux
+bash claude-basics/setup/install_tools.sh --dry-run
+bash claude-basics/setup/install_tools.sh
+```
+
+| フラグ | 説明 |
+|---|---|
+| `-DryRun` / `--dry-run` | 何を入れるか表示するだけ |
+| `-Only <key>` / `--only <key>` | 指定ツールだけ処理（例: `codex`） |
+| `-Skip <key,...>` / `--skip <key,...>` | 指定ツールを除外 |
+| `-IncludeOptional` (ps1) | 任意扱いの PowerShell 7 も入れる |
+| `-Force` (ps1) | 導入済みでも再インストール |
+
+インストール後は **シェルを開き直してから**（PATH 反映のため）認証する:
+
+```bash
+gh auth login     # GitHub
+codex login       # ChatGPT アカウント（/codex-review が使う）
+claude            # 初回起動で Anthropic 認証
+```
+
+Windows で winget が無い場合は Microsoft Store の「アプリ インストーラー」を先に入れる。
+
+### 2. `cc` エイリアスの登録
+
+`cc` = `claude --dangerously-skip-permissions`（引数はそのまま渡る）をシェルのプロファイルに追記する。
+冪等 — 既に `cc` が定義済みならスキップする。
+
+```powershell
+# Windows（5.1 / 7 の両プロファイルに書く）
+powershell -ExecutionPolicy Bypass -File claude-basics\setup\install_aliases.ps1
+powershell -ExecutionPolicy Bypass -File claude-basics\setup\install_aliases.ps1 -WhatIf          # 確認だけ
+powershell -ExecutionPolicy Bypass -File claude-basics\setup\install_aliases.ps1 -Scope PowerShell # 7 だけ
+```
+
+```bash
+# macOS / Linux（$SHELL から .bashrc / .zshrc を判定）
+bash claude-basics/setup/install_aliases.sh
+bash claude-basics/setup/install_aliases.sh --rc ~/.zshrc
+bash claude-basics/setup/install_aliases.sh --dry-run
+```
+
+反映は新しいシェルを開くか、`. $PROFILE` / `source ~/.bashrc`。
 
 ## auto_implement_issues.sh
 

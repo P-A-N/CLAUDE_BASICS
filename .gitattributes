@@ -1,0 +1,6 @@
+# bash スクリプトは CRLF になると `\r` で壊れるので必ず LF で保つ
+*.sh text eol=lf
+
+# PowerShell 5.1 は BOM 無し UTF-8 を ANSI 扱いして日本語を壊すため
+# バイナリ扱いにして BOM と改行をそのまま保存する
+*.ps1 -text
