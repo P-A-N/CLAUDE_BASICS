@@ -5,6 +5,7 @@
 .DESCRIPTION
   以下を冪等に追記する（既に登録済みならスキップ）:
     cc  ... claude --dangerously-skip-permissions（追加引数はそのまま渡す）
+    cdx ... codex --dangerously-bypass-approvals-and-sandbox（追加引数はそのまま渡す）
 
   Windows PowerShell 5.1 と PowerShell 7 の両方のプロファイルに書く。
   -Scope で片方だけに絞れる。
@@ -26,10 +27,6 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $marker = '# --- Claude Code (claude-basics) ---'
-$block = @"
-$marker
-function cc { claude --dangerously-skip-permissions @args }
-"@
 
 $docs = [Environment]::GetFolderPath('MyDocuments')
 $targets = @()
@@ -50,21 +47,28 @@ foreach ($path in $targets) {
 
     $existing = if (Test-Path $path) { Get-Content $path -Raw } else { '' }
 
-    if ($existing -match '(?m)^\s*function\s+cc\s*\{' -and -not $Force) {
-        Write-Host "skip (cc は既に定義済み): $path"
-        continue
+    $lines = [System.Collections.Generic.List[string]]::new()
+    if ($existing -notmatch [regex]::Escape($marker)) {
+        $lines.Add($marker)
     }
-    if ($existing -match [regex]::Escape($marker) -and -not $Force) {
+    if ($existing -notmatch '(?m)^\s*(function\s+cc\s*\{|Set-Alias\s+cc\b|New-Alias\s+cc\b)' -or $Force) {
+        $lines.Add('function cc { claude --dangerously-skip-permissions @args }')
+    }
+    if ($existing -notmatch '(?m)^\s*(function\s+cdx\s*\{|Set-Alias\s+cdx\b|New-Alias\s+cdx\b)' -or $Force) {
+        $lines.Add('function cdx { codex --dangerously-bypass-approvals-and-sandbox @args }')
+    }
+
+    if ($lines.Count -eq 0) {
         Write-Host "skip (登録済み): $path"
         continue
     }
 
-    if ($PSCmdlet.ShouldProcess($path, 'append cc alias')) {
+    if ($PSCmdlet.ShouldProcess($path, 'append shell shortcuts')) {
         if ($existing -and -not $existing.EndsWith("`n")) { Add-Content -Path $path -Value '' }
-        Add-Content -Path $path -Value $block -Encoding utf8
+        Add-Content -Path $path -Value ($lines -join [Environment]::NewLine) -Encoding utf8
         Write-Host "登録しました: $path"
     }
 }
 
 Write-Host ''
-Write-Host '新しいシェルを開くか、`. $PROFILE` で読み直すと cc が使えます。'
+Write-Host '新しいシェルを開くか、`. $PROFILE` で読み直すと cc / cdx が使えます。'

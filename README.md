@@ -11,7 +11,7 @@ Claude Code を使った開発でプロジェクト横断的に再利用した�
 | [`auto_implement_issues.sh`](./auto_implement_issues.sh) | GitHub issue を Claude Code + `/codex-review` で自動実装 / 自動調査するスクリプト |
 | [`skills/autoimplement/SKILL.md`](./skills/autoimplement/) | `auto_implement_issues.sh` を呼び出す Claude Code スキル (`/autoimplement`) |
 | [`setup/install_tools.ps1`](./setup/install_tools.ps1) / [`.sh`](./setup/install_tools.sh) | Python / Node / uv / gh / jq / Claude Code / Codex CLI を一括インストールする |
-| [`setup/install_aliases.ps1`](./setup/install_aliases.ps1) / [`.sh`](./setup/install_aliases.sh) | `cc` シェルショートカット（`claude --dangerously-skip-permissions`）をシェルのプロファイルに登録する |
+| [`setup/install_aliases.ps1`](./setup/install_aliases.ps1) / [`.sh`](./setup/install_aliases.sh) | `cc` / `cdx` シェルショートカットをシェルのプロファイルに登録する |
 
 ## 目的
 
@@ -42,7 +42,7 @@ git commit -m "Add CLAUDE_BASICS as submodule"
 
 ## 新しいマシンのセットアップ
 
-新環境で最初にやること。`setup/` の 2 本を順に流せば、ツール導入と `cc` ショートカット登録が終わる。
+新環境で最初にやること。`setup/` の 2 本を順に流せば、ツール導入と `cc` / `cdx` ショートカット登録が終わる。
 
 ### 1. ツールの一括インストール
 
@@ -79,10 +79,14 @@ claude            # 初回起動で Anthropic 認証
 
 Windows で winget が無い場合は Microsoft Store の「アプリ インストーラー」を先に入れる。
 
-### 2. `cc` エイリアスの登録
+### 2. `cc` / `cdx` エイリアスの登録
 
-`cc` = `claude --dangerously-skip-permissions`（引数はそのまま渡る）をシェルのプロファイルに追記する。
-冪等 — 既に `cc` が定義済みならスキップする。
+以下をシェルのプロファイルに追記する。どちらも引数はそのまま渡る。
+
+- `cc` = `claude --dangerously-skip-permissions`
+- `cdx` = `codex --dangerously-bypass-approvals-and-sandbox`
+
+冪等 — 既に定義済みのショートカットはスキップし、不足分だけ追加する。
 
 ```powershell
 # Windows（5.1 / 7 の両プロファイルに書く）

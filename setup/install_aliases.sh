@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Claude Code 用のシェルショートカットを bash / zsh の rc に登録する（冪等）。
 #
-#   cc ... claude --dangerously-skip-permissions（追加引数はそのまま渡す）
+#   cc  ... claude --dangerously-skip-permissions（追加引数はそのまま渡す）
+#   cdx ... codex --dangerously-bypass-approvals-and-sandbox（追加引数はそのまま渡す）
 #
 # 使い方:
 #   bash claude-basics/setup/install_aliases.sh          # ログインシェルの rc に追記
@@ -30,20 +31,33 @@ if [[ -z "$RC" ]]; then
   esac
 fi
 
-if [[ -f "$RC" ]] && grep -qF "$MARKER" "$RC"; then
+HAS_MARKER=0
+HAS_CC=0
+HAS_CDX=0
+
+if [[ -f "$RC" ]]; then
+  grep -qF "$MARKER" "$RC" && HAS_MARKER=1
+  grep -qE '^[[:space:]]*(alias[[:space:]]+cc=|cc[[:space:]]*\(\))' "$RC" && HAS_CC=1
+  grep -qE '^[[:space:]]*(alias[[:space:]]+cdx=|cdx[[:space:]]*\(\))' "$RC" && HAS_CDX=1
+fi
+
+LINES=()
+if [[ $HAS_MARKER -eq 0 ]]; then
+  LINES+=("$MARKER")
+fi
+if [[ $HAS_CC -eq 0 ]]; then
+  LINES+=('cc() { claude --dangerously-skip-permissions "$@"; }')
+fi
+if [[ $HAS_CDX -eq 0 ]]; then
+  LINES+=('cdx() { codex --dangerously-bypass-approvals-and-sandbox "$@"; }')
+fi
+
+if [[ ${#LINES[@]} -eq 0 ]]; then
   echo "skip (登録済み): $RC"
   exit 0
 fi
 
-if [[ -f "$RC" ]] && grep -qE '^[[:space:]]*(alias[[:space:]]+cc=|cc[[:space:]]*\(\))' "$RC"; then
-  echo "skip (cc は既に定義済み): $RC" >&2
-  exit 0
-fi
-
-BLOCK="
-$MARKER
-cc() { claude --dangerously-skip-permissions \"\$@\"; }
-"
+BLOCK="$(printf '%s\n' "${LINES[@]}")"
 
 if [[ $DRY_RUN -eq 1 ]]; then
   echo "would append to $RC:"
