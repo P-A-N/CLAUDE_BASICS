@@ -1,40 +1,45 @@
 ---
 name: codex-review
-description: Send the current plan or uncommitted code changes to OpenAI Codex for iterative review via the Codex companion runtime (app-server). Claude and Codex go back-and-forth until Codex approves. Max 5 rounds. In code-review mode, after approval auto-commits and merges the feature branch into main (no push).
-user_invocable: true
+description: Send the current plan, uncommitted changes, committed branch diff, or a specific commit to OpenAI Codex for iterative review. Claude and Codex go back-and-forth until Codex approves. Max 5 rounds. In code-review mode, after approval auto-commits any reviewed fixes and merges the feature branch into main (no push).
 ---
 
-# Codex Iterative Review (Plan + Code) with Auto-Commit/Merge
+# Codex Iterative Review (Plan + Working Tree + Commits) with Auto-Commit/Merge
 
-Send the current implementation plan or uncommitted code changes to OpenAI Codex for review. Claude revises based on Codex's feedback and re-submits until Codex approves. Max 5 rounds.
+Send the current implementation plan or a Claude-selected Git change target to OpenAI Codex for review. Code targets may be uncommitted changes, all branch changes relative to a base branch (including committed changes), or a specific commit. Claude revises based on Codex's feedback and re-submits until Codex approves. Max 5 rounds.
 
 On code-review approval, automatically stage+commit the reviewed changes and merge the feature branch back into main (local only — never pushes).
 
-> **Why the companion runtime (not `codex exec`)**: On a ChatGPT-account login,
-> `codex exec` (and any explicit `-m gpt-5.x-codex`) returns
-> `400 ... model is not supported when using Codex with a ChatGPT account`.
-> The Codex **companion runtime** (`codex-companion.mjs`, the same path
-> `/codex:review` uses) talks to `codex app-server` and works with ChatGPT auth
-> **as long as no unsupported model is forced**. This skill therefore routes every
-> Codex call through `codex-companion.mjs task` with the **default model**
-> (no `-m`). Do not reintroduce `-m gpt-5.3-codex` — it will 400.
+> **Runtime selection**: Use the Codex CLI's native `codex review` command for code
+> review. It understands working-tree, base-branch, and commit targets and works
+> with ChatGPT login. Use the companion runtime only for plan review, which has no
+> native Git review target. Do not pin a legacy `gpt-5.x-codex` model name. For this
+> account, prefer `gpt-5.6-sol` with high reasoning for merge-gate reviews; if that
+> model is unavailable, retry once with the account default model and high reasoning.
 
 ---
 
 ## When to Invoke
 
 - When the user runs `/codex-review` during or after plan mode (plan review)
-- When the user runs `/codex-review` after implementing code changes (code review)
+- When the user runs `/codex-review` after implementing code changes, including
+  changes that have already been committed (code review)
 - When the user wants a second opinion from a different model
 
 ## Agent Instructions
 
 When invoked, perform the following iterative review loop.
 
-### Step 0: Resolve the companion runtime
+### Step 0: Check Codex and resolve the companion runtime when needed
 
-All Codex calls go through the companion script. Resolve its path once (picks the
-newest installed plugin version) and reuse it for every round:
+Check that the current Codex CLI and authentication are ready:
+
+```bash
+codex --version
+codex login status
+```
+
+For plan review only, resolve the companion path once (picks the newest installed
+plugin version) and reuse it for every round:
 
 ```bash
 COMPANION=$(ls -t "$HOME/.claude/plugins/cache/openai-codex/codex/"*/scripts/codex-companion.mjs 2>/dev/null | head -1)
@@ -46,7 +51,7 @@ node "$COMPANION" setup --json | head -40
 If `setup --json` reports `"ready": false`, stop and surface its `nextSteps`
 (usually `!codex login` or `npm install -g @openai/codex`).
 
-### Step 0b: Stale-runtime recovery (do this FIRST if any Codex call model-gates)
+### Step 0b: Stale-runtime recovery (plan review only)
 
 **Symptom**: every `task` call — even with **no `-m`** — fails with
 `400 ... The '<model>' model is not supported when using Codex with a ChatGPT
@@ -82,43 +87,90 @@ default-workspace change, or `!codex login --with-api-key`.)
 
 ### Step 1: Generate Session ID
 
-Generate a unique ID to avoid conflicts with other concurrent Claude Code sessions
-(`uuidgen` is not available on all platforms, so use a timestamp):
+Generate a unique ID to avoid conflicts with concurrent Claude Code sessions:
 
 ```bash
-REVIEW_ID=$(date +%s | tail -c 9)
+if command -v uuidgen >/dev/null 2>&1; then
+  REVIEW_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+else
+  REVIEW_ID="$(date +%s)-$$-${RANDOM:-0}"
+fi
 ```
 
 Use this for the temp file paths: `/tmp/claude-review-${REVIEW_ID}.md` (the content
 sent to Codex) and `/tmp/codex-review-${REVIEW_ID}.json` (Codex's JSON response).
 
-### Step 2: Detect Review Mode & Capture Content
+### Step 2: Select review mode and code target
 
-Determine what to review based on context:
+Claude selects the target from user intent and repository state. An explicit user
+target always wins.
 
 **Mode A — Plan Review** (if a plan exists in the current conversation context):
 1. Write the full plan content to `/tmp/claude-review-${REVIEW_ID}.md`
 2. Set `REVIEW_MODE=plan`
 
-**Mode B — Code Review** (if no plan, but uncommitted changes exist):
-1. Run `git diff` and `git diff --cached` to capture all staged and unstaged changes
-2. Write the combined diff output to `/tmp/claude-review-${REVIEW_ID}.md`
-3. Set `REVIEW_MODE=code`
+**Mode B — Uncommitted Code Review**:
+Use when staged, unstaged, or untracked changes are the intended target.
 
-**No content**: If there is no plan in context AND no uncommitted changes, ask the user what they want reviewed.
+```bash
+REVIEW_MODE=code
+REVIEW_TARGET=uncommitted
+```
 
-Tell the user which mode was detected: "Detected **plan review** mode" or "Detected **code review** mode — reviewing uncommitted changes".
+Native `codex review --uncommitted` includes staged, unstaged, and untracked
+changes. Before every round, also run `git status --short` and preserve the listed
+paths as `REVIEWED_PATHS` for safe staging after approval.
+
+**Mode C — Branch/Base Code Review**:
+Use when the feature branch already contains commits, or when the user asks to
+review everything relative to a base branch. Determine the base from the user's
+request, then `origin/HEAD`, then fall back to `main`.
+
+```bash
+REVIEW_MODE=code
+REVIEW_TARGET=base
+REVIEW_BASE=<base-branch>
+git diff --name-only "$REVIEW_BASE"...HEAD
+git diff --name-only
+git diff --cached --name-only
+```
+
+This mode intentionally reviews committed branch changes. Any uncommitted fixes
+made during the loop are also part of the effective branch review and must be
+included in `REVIEWED_PATHS`.
+
+**Mode D — Single Commit Review**:
+Use when the user names a commit or explicitly asks for only the latest commit.
+
+```bash
+REVIEW_MODE=code
+REVIEW_TARGET=commit
+REVIEW_COMMIT=<sha-or-ref>
+git diff-tree --no-commit-id --name-only -r "$REVIEW_COMMIT"
+```
+
+If fixes are required for an existing commit, do not rewrite or amend it
+automatically. Make a new working-tree fix, and switch subsequent rounds to
+`REVIEW_TARGET=base` so Codex reviews the original commit plus the fix together.
+
+**Default detection order**:
+1. Explicit plan, commit, or base target from the user
+2. Uncommitted changes, including untracked files
+3. Current branch changes relative to the detected base branch
+4. Otherwise ask what should be reviewed
+
+Tell the user the selected mode and exact target, for example:
+`Detected code review — reviewing all changes relative to main (committed changes included).`
 
 ### Step 3: Initial Review (Round 1)
 
-Run Codex through the companion runtime in the **foreground** with `--fresh` (new
-thread) and `--json` (so you can reliably parse the result). Do **not** pass `-m`
-unless the user explicitly requested a model (see Notes). The prompt differs by mode.
+Run Codex in the **foreground**. Plan review uses the companion runtime. Code
+review uses native `codex review` with the selected Git target.
 
 **For Plan Review (`REVIEW_MODE=plan`):**
 
 ```bash
-node "$COMPANION" task --fresh --json \
+node "$COMPANION" task --fresh --json --model gpt-5.6-sol --effort high \
   "Review the implementation plan in /tmp/claude-review-${REVIEW_ID}.md. Read it, then focus on:
 1. Correctness - Will this plan achieve the stated goals?
 2. Risks - What could go wrong? Edge cases? Data loss?
@@ -131,11 +183,13 @@ If changes are needed, end with exactly: VERDICT: REVISE" \
   > /tmp/codex-review-${REVIEW_ID}.json 2>/tmp/codex-review-${REVIEW_ID}.err
 ```
 
+If `gpt-5.6-sol` is unavailable for the account/workspace, retry once without
+`--model` while keeping `--effort high`.
+
 **For Code Review (`REVIEW_MODE=code`):**
 
 ```bash
-node "$COMPANION" task --fresh --json \
-  "Review the code changes (git diff) in /tmp/claude-review-${REVIEW_ID}.md. Also read the relevant source files in the repo for full context. Focus on:
+CODEX_REVIEW_PROMPT="Review the selected code changes. Read the relevant source files and project instructions for full context. Focus on:
 1. Correctness / bug risk - Will this code work as intended?
 2. Regression risk - Could this break existing functionality?
 3. Edge cases - Are boundary conditions handled?
@@ -148,35 +202,50 @@ Classify each issue as:
 Report only real problems. Skip style nitpicks unless they could cause bugs.
 
 If the code is solid and ready to merge, end your review with exactly: VERDICT: APPROVED
-If changes are needed, end with exactly: VERDICT: REVISE" \
-  > /tmp/codex-review-${REVIEW_ID}.json 2>/tmp/codex-review-${REVIEW_ID}.err
+If changes are needed, end with exactly: VERDICT: REVISE"
+
+case "$REVIEW_TARGET" in
+  uncommitted)
+    codex -m gpt-5.6-sol -c model_reasoning_effort='"high"' \
+      review --uncommitted "$CODEX_REVIEW_PROMPT"
+    ;;
+  base)
+    codex -m gpt-5.6-sol -c model_reasoning_effort='"high"' \
+      review --base "$REVIEW_BASE" "$CODEX_REVIEW_PROMPT"
+    ;;
+  commit)
+    codex -m gpt-5.6-sol -c model_reasoning_effort='"high"' \
+      review --commit "$REVIEW_COMMIT" "$CODEX_REVIEW_PROMPT"
+    ;;
+esac > /tmp/codex-review-${REVIEW_ID}.txt 2>/tmp/codex-review-${REVIEW_ID}.err
 ```
 
+If `gpt-5.6-sol` is unavailable, retry once without `-m gpt-5.6-sol`; keep the
+high reasoning override. Do not fall back to a legacy hard-coded model.
+
 **Notes:**
-- The companion `task` runs `read-only` by default (no `--write`), so Codex can read
-  the repo for context but cannot modify anything. Do NOT add `--write`.
-- **Model**: omit `-m` to use the default (the only thing guaranteed to work on a
-  ChatGPT account). If the user explicitly passed a model (`/codex-review <model>`),
-  add `-m <model>`, but warn them that explicit `gpt-5.x-codex` models 400 on
-  ChatGPT-account logins — they need API-key auth (`!codex login --with-api-key`) for
-  those.
-- The companion keeps the thread per-repo; subsequent rounds use `--resume-last`
-  (see Step 6) instead of a captured session id.
+- Both native `codex review` and companion plan tasks are read-only. Do not add
+  write access.
+- If the user explicitly requests another available model or reasoning effort,
+  honor it instead of the defaults above.
+- Do not use `--resume-last`; it is repository-global and can resume another
+  concurrent review. Every round is fresh and includes the previous feedback and
+  revision summary in its prompt.
 
 ### Step 4: Read Review & Check Verdict
 
-1. Read `/tmp/codex-review-${REVIEW_ID}.json`. The review text is the `rawOutput`
-   field. Extract it with the Read tool, or in the same bash shell with
+1. For plan mode, read `/tmp/codex-review-${REVIEW_ID}.json`; the review text is
+   the `rawOutput` field. Extract it with the Read tool, or in the same shell with
    `python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['rawOutput'])" /tmp/codex-review-${REVIEW_ID}.json`
    or `jq -r .rawOutput /tmp/codex-review-${REVIEW_ID}.json`.
    (Do NOT use `node -e "...'/tmp/...'"` on Windows: bash redirects to the MSYS `/tmp`
    but Node resolves `/tmp` to `C:\tmp`, so they disagree. `python3`/`jq`/cat read the
    same MSYS `/tmp` as the redirect.)
-   - If `status` is non-zero or `rawOutput` is empty, the run failed — show the
-     `.err` file (often the model-gating 400). If it is the model 400 and you forced
-     a model, retry once without `-m`. **If it still model-gates with no `-m`, apply
-     Step 0b (stale-runtime recovery: kill the broker + app-server, then retry once)
-     before concluding it is an account problem.** Otherwise surface the error and stop.
+   For code mode, read `/tmp/codex-review-${REVIEW_ID}.txt` directly.
+   - If the command status is non-zero or output is empty, the run failed — show the
+     `.err` file. If a pinned model is unavailable, retry once with the account
+     default. For companion-based plan review only, if the default still
+     model-gates, apply Step 0b before concluding it is an account problem.
 2. Present Codex's review to the user:
 
 ```
@@ -210,12 +279,15 @@ Inform the user: "Sending revised [plan|code] back to Codex for re-review..."
 
 ### Step 6: Re-submit to Codex (Rounds 2-5)
 
-Resume the **same** Codex thread (so it has full context of the prior rounds) with
-`--resume-last`:
+Start a fresh review each round to avoid cross-session collisions. Include the
+previous review and the exact revisions in the next prompt.
 
 ```bash
-node "$COMPANION" task --resume-last --json \
+node "$COMPANION" task --fresh --json --model gpt-5.6-sol --effort high \
   "I've revised the [plan|code] based on your feedback. The updated content is in /tmp/claude-review-${REVIEW_ID}.md.
+
+Previous review:
+[Previous Codex review]
 
 Here's what I changed:
 [List the specific changes made]
@@ -225,15 +297,12 @@ If more changes are needed, end with: VERDICT: REVISE" \
   > /tmp/codex-review-${REVIEW_ID}.json 2>/tmp/codex-review-${REVIEW_ID}.err
 ```
 
-`--resume-last` continues the most recent task thread for this repository. (If you
-are running multiple concurrent Codex tasks in the same repo this could grab the
-wrong thread; for a normal single review loop it is correct.)
+For code mode, rerun the matching native `codex review` command from Step 3 with
+the previous review and revision list appended to `CODEX_REVIEW_PROMPT`. Recompute
+`REVIEWED_PATHS` before every round. If a commit-only review required fixes, switch
+to base mode as described in Step 2.
 
 Then go back to **Step 4** (Read Review & Check Verdict).
-
-**Important:** If `--resume-last` fails (e.g., "No previous Codex task thread"),
-fall back to a fresh `--fresh` call with context about the prior rounds included in
-the prompt.
 
 ### Step 7: Present Final Result
 
@@ -264,7 +333,7 @@ If max rounds were reached without approval:
 **Codex still has concerns. Review the remaining items and decide whether to proceed.**
 ```
 
-### Step 8: Auto-commit & Auto-merge (code mode only, on APPROVED)
+### Step 8: Auto-commit reviewed fixes & Auto-merge (code mode only, on APPROVED)
 
 This step runs **only** when all of the following are true:
 - `REVIEW_MODE=code`
@@ -273,21 +342,26 @@ This step runs **only** when all of the following are true:
 
 Skip this step silently for plan-review mode.
 
-**Substep 8a — Generate commit message**
+If the reviewed target was already fully committed and no fixes produced working
+tree changes, skip commit creation and proceed to merge-target detection.
+
+**Substep 8a — Generate commit message for working-tree changes**
 
 Claude writes a 1–2 line imperative commit message from the diff it already reviewed. Format:
 
 ```
 <short imperative subject, under 70 chars>
 
-Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+Co-Authored-By: Claude <noreply@anthropic.com>
 ```
 
 Do not mention the review process in the subject — describe the code change itself.
 
 **Substep 8b — Stage and commit in the current worktree**
 
-Stage only files that appeared in the reviewed diff (do NOT `git add -A` or `.`). Commit with the message from 8a.
+Stage only paths in `REVIEWED_PATHS` that still have working-tree changes (do NOT
+`git add -A` or `.`). This may include untracked files because native
+`--uncommitted` review included them. Commit with the message from 8a.
 
 ```bash
 # From the current worktree (where the changes are)
@@ -295,7 +369,7 @@ git add <files-from-diff>
 git commit -m "$(cat <<'EOF'
 <subject>
 
-Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+Co-Authored-By: Claude <noreply@anthropic.com>
 EOF
 )"
 ```
@@ -343,32 +417,31 @@ After a successful merge, tell the user:
 
 Remove the session-scoped temporary files:
 ```bash
-rm -f /tmp/claude-review-${REVIEW_ID}.md /tmp/codex-review-${REVIEW_ID}.json /tmp/codex-review-${REVIEW_ID}.err
+rm -f /tmp/claude-review-${REVIEW_ID}.md /tmp/codex-review-${REVIEW_ID}.json /tmp/codex-review-${REVIEW_ID}.txt /tmp/codex-review-${REVIEW_ID}.err
 ```
 
 ## Loop Summary
 
 ```
-Round 1: Claude sends [plan|diff] → companion task --fresh → Codex reviews → REVISE?
-Round 2: Claude revises [plan|code] → companion task --resume-last → Codex re-reviews → REVISE?
-Round 3: Claude revises → companion task --resume-last → APPROVED
+Round 1: Claude selects [plan|uncommitted|base|commit] → Codex reviews → REVISE?
+Round 2: Claude revises → fresh review with prior feedback included → REVISE?
+Round 3: Claude revises → fresh review with prior feedback included → APPROVED
   ↓ (code mode only)
 Auto-commit in current worktree → Auto-merge feature branch into main (local, no push)
 ```
 
-Max 5 rounds. Each round preserves Codex's conversation context via `--resume-last`.
+Max 5 rounds. Each fresh round receives the prior review and revision summary
+explicitly, avoiding repository-global resume collisions.
 
 ## Rules
 
-- Every Codex call goes through `node "$COMPANION" task` (the app-server companion
-  runtime), NOT `codex exec`. `codex exec` 400s on ChatGPT-account logins.
-- **Default model (no `-m`)**. Only pass `-m <model>` when the user explicitly asked
-  for one, and warn that explicit `gpt-5.x-codex` models 400 on ChatGPT accounts
-  (API-key auth required for those).
+- Code review uses native `codex review`; plan review uses the companion runtime.
+- Default merge-gate model is `gpt-5.6-sol` with high reasoning. If unavailable,
+  retry once with the account default. Honor an explicit user model/effort request.
 - Claude **actively revises** based on Codex feedback between rounds — this is NOT just passing messages, Claude should make real improvements
 - In code review mode, Claude fixes BLOCKING issues only. NON_BLOCKING items are reported but not auto-fixed
 - In code review mode, if a fix contradicts the user's explicit requirements or the project's CLAUDE.md rules, skip that fix and note it for the user
-- The companion `task` runs read-only (no `--write`) — Codex never modifies files
+- Codex review runs read-only — Codex never modifies files
 - Max 5 review rounds to prevent infinite loops
 - Show the user each round's feedback and revisions so they can follow along
 - If the companion is missing or `setup --json` is not ready, inform the user and suggest `npm install -g @openai/codex` then `!codex login`
@@ -377,8 +450,12 @@ Max 5 rounds. Each round preserves Codex's conversation context via `--resume-la
 
 - Runs only on **VERDICT: APPROVED** in code-review mode. Never for plan review. Never on max-rounds-reached-without-approval.
 - Skip if the user has said "review only", "don't commit", or "don't merge" in the current invocation.
-- Stage only files that appeared in the reviewed diff — never `git add -A` / `.` (avoids staging secrets or unrelated untracked files).
-- Commit message: Claude writes a 1–2 line imperative subject from the diff it reviewed. Always include `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`.
+- Stage only working-tree paths recorded in `REVIEWED_PATHS` — never `git add -A`
+  or `.`. Reviewed untracked files are allowed; unrelated untracked files are not.
+- If the branch/base or commit target is already committed and there are no
+  reviewed working-tree fixes, do not create an empty or duplicate commit.
+- Commit message: Claude writes a 1–2 line imperative subject from the reviewed
+  working-tree changes and uses `Co-Authored-By: Claude <noreply@anthropic.com>`.
 - On pre-commit hook failure: stop and report. Do NOT `--no-verify`. Do NOT amend.
 - Merge target: the branch pointed to by `origin/HEAD` (default `main`), merged with `--no-ff`. If already on main, skip the merge step.
 - On merge conflict: stop immediately. Do not attempt to auto-resolve. Tell the user which files conflicted and let them resolve manually.
