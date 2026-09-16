@@ -13,8 +13,8 @@ On code-review approval, automatically stage+commit the reviewed changes and mer
 > review. It understands working-tree, base-branch, and commit targets and works
 > with ChatGPT login. Use the companion runtime only for plan review, which has no
 > native Git review target. Do not pin a legacy `gpt-5.x-codex` model name. For this
-> account, prefer `gpt-5.6-sol` with low reasoning for merge-gate reviews; if that
-> model is unavailable, retry once with the account default model and low reasoning.
+> account, prefer `gpt-5.6-sol` with medium reasoning for merge-gate reviews; if that
+> model is unavailable, retry once with the account default model and medium reasoning.
 
 ---
 
@@ -205,7 +205,7 @@ review uses native `codex review` with the selected Git target.
 **For Plan Review (`REVIEW_MODE=plan`):**
 
 ```bash
-node "$COMPANION" task --fresh --json --model gpt-5.6-sol --effort low \
+node "$COMPANION" task --fresh --json --model gpt-5.6-sol --effort medium \
   "Review the implementation plan in /tmp/claude-review-${REVIEW_ID}.md. Read it, then focus on:
 1. Correctness - Will this plan achieve the stated goals?
 2. Risks - What could go wrong? Edge cases? Data loss?
@@ -219,7 +219,7 @@ If changes are needed, end with exactly: VERDICT: REVISE" \
 ```
 
 If `gpt-5.6-sol` is unavailable for the account/workspace, retry once without
-`--model` while keeping `--effort low`.
+`--model` while keeping `--effort medium`.
 
 **For Code Review (`REVIEW_MODE=code`):**
 
@@ -241,22 +241,22 @@ If changes are needed, end with exactly: VERDICT: REVISE"
 
 case "$REVIEW_TARGET" in
   uncommitted)
-    codex -m gpt-5.6-sol -c model_reasoning_effort='"low"' \
+    codex -m gpt-5.6-sol -c model_reasoning_effort='"medium"' \
       review --uncommitted "$CODEX_REVIEW_PROMPT"
     ;;
   base)
-    codex -m gpt-5.6-sol -c model_reasoning_effort='"low"' \
+    codex -m gpt-5.6-sol -c model_reasoning_effort='"medium"' \
       review --base "$REVIEW_BASE" "$CODEX_REVIEW_PROMPT"
     ;;
   commit)
-    codex -m gpt-5.6-sol -c model_reasoning_effort='"low"' \
+    codex -m gpt-5.6-sol -c model_reasoning_effort='"medium"' \
       review --commit "$REVIEW_COMMIT" "$CODEX_REVIEW_PROMPT"
     ;;
 esac > /tmp/codex-review-${REVIEW_ID}.txt 2>/tmp/codex-review-${REVIEW_ID}.err
 ```
 
 If `gpt-5.6-sol` is unavailable, retry once without `-m gpt-5.6-sol`; keep the
-low reasoning override. Do not fall back to a legacy hard-coded model.
+medium reasoning override. Do not fall back to a legacy hard-coded model.
 
 **Notes:**
 - Both native `codex review` and companion plan tasks are read-only. Do not add
@@ -318,7 +318,7 @@ Start a fresh review each round to avoid cross-session collisions. Include the
 previous review and the exact revisions in the next prompt.
 
 ```bash
-node "$COMPANION" task --fresh --json --model gpt-5.6-sol --effort low \
+node "$COMPANION" task --fresh --json --model gpt-5.6-sol --effort medium \
   "I've revised the [plan|code] based on your feedback. The updated content is in /tmp/claude-review-${REVIEW_ID}.md.
 
 Previous review:
@@ -471,7 +471,7 @@ explicitly, avoiding repository-global resume collisions.
 ## Rules
 
 - Code review uses native `codex review`; plan review uses the companion runtime.
-- Default merge-gate model is `gpt-5.6-sol` with low reasoning. If unavailable,
+- Default merge-gate model is `gpt-5.6-sol` with medium reasoning. If unavailable,
   retry once with the account default. Honor an explicit user model/effort request.
 - Claude **actively revises** based on Codex feedback between rounds — this is NOT just passing messages, Claude should make real improvements
 - In code review mode, Claude fixes BLOCKING issues only. NON_BLOCKING items are reported but not auto-fixed
