@@ -13,8 +13,8 @@ On code-review approval, automatically stage+commit the reviewed changes and mer
 > review. It understands working-tree, base-branch, and commit targets and works
 > with ChatGPT login. Use the companion runtime only for plan review, which has no
 > native Git review target. Do not pin a legacy `gpt-5.x-codex` model name. For this
-> account, prefer `gpt-5.6-sol` with high reasoning for merge-gate reviews; if that
-> model is unavailable, retry once with the account default model and high reasoning.
+> account, prefer `gpt-5.6-sol` with low reasoning for merge-gate reviews; if that
+> model is unavailable, retry once with the account default model and low reasoning.
 
 ---
 
@@ -84,6 +84,41 @@ or switch workspaces to chase this — it is a stale-process issue, not an accou
 version issue. (Only if a *fresh* runtime still gates every model is it a real
 account/plan/workspace entitlement problem; then fall back to `!codex login`,
 default-workspace change, or `!codex login --with-api-key`.)
+
+### Step 0c: Runs that never finish (sandbox blocks every shell command)
+
+**Symptom**: `codex review` runs for 10+ minutes, the `.txt` output stays **0 bytes**, and
+the `.err` file fills with repeated lines like:
+
+```
+ERROR codex_core::tools::router: error=`"...powershell.exe" -Command "..."` rejected: blocked by policy
+exec ... declined in 0ms: ... rejected: blocked by policy
+```
+
+**Cause**: on this machine Codex cannot spawn a shell at all. Every command it tries is
+declined, and it keeps rewriting the command and retrying — reading image dimensions,
+running a Python snippet to verify math, listing a directory. It can eventually give up
+and write a review (round 1 did), but it can also loop until killed, burning the account's
+usage allowance the whole time.
+
+**What to do**:
+
+1. **Always run `codex review` with a timeout** (or in the background) and check the
+   `.txt` size. If it is still empty after ~10 minutes, the run is looping.
+2. **Kill it** — `pkill -f codex`, or on Windows:
+   `Get-Process | Where-Object { $_.ProcessName -like '*codex*' } | Stop-Process -Force`
+3. **Narrow the target before retrying.** Codex goes looking at binaries referenced by the
+   diff. Committing large assets / data files first, so the review sees only source, avoids
+   the worst loops.
+4. If a round produced no new findings, **do not keep retrying**. Report what the earlier
+   round found, say the re-review did not complete, and let the user decide.
+
+⚠ Do **not** raise the reasoning effort or switch models to work around this — it is a
+sandbox policy issue, not a model issue, and a longer-thinking model just loops for longer.
+
+**Usage limit**: if the `.err` shows
+`ERROR: You've hit your usage limit`, Codex is unavailable until the quota resets.
+Stop and tell the user; there is nothing to retry.
 
 ### Step 1: Generate Session ID
 
@@ -170,7 +205,7 @@ review uses native `codex review` with the selected Git target.
 **For Plan Review (`REVIEW_MODE=plan`):**
 
 ```bash
-node "$COMPANION" task --fresh --json --model gpt-5.6-sol --effort high \
+node "$COMPANION" task --fresh --json --model gpt-5.6-sol --effort low \
   "Review the implementation plan in /tmp/claude-review-${REVIEW_ID}.md. Read it, then focus on:
 1. Correctness - Will this plan achieve the stated goals?
 2. Risks - What could go wrong? Edge cases? Data loss?
@@ -184,7 +219,7 @@ If changes are needed, end with exactly: VERDICT: REVISE" \
 ```
 
 If `gpt-5.6-sol` is unavailable for the account/workspace, retry once without
-`--model` while keeping `--effort high`.
+`--model` while keeping `--effort low`.
 
 **For Code Review (`REVIEW_MODE=code`):**
 
@@ -206,22 +241,22 @@ If changes are needed, end with exactly: VERDICT: REVISE"
 
 case "$REVIEW_TARGET" in
   uncommitted)
-    codex -m gpt-5.6-sol -c model_reasoning_effort='"high"' \
+    codex -m gpt-5.6-sol -c model_reasoning_effort='"low"' \
       review --uncommitted "$CODEX_REVIEW_PROMPT"
     ;;
   base)
-    codex -m gpt-5.6-sol -c model_reasoning_effort='"high"' \
+    codex -m gpt-5.6-sol -c model_reasoning_effort='"low"' \
       review --base "$REVIEW_BASE" "$CODEX_REVIEW_PROMPT"
     ;;
   commit)
-    codex -m gpt-5.6-sol -c model_reasoning_effort='"high"' \
+    codex -m gpt-5.6-sol -c model_reasoning_effort='"low"' \
       review --commit "$REVIEW_COMMIT" "$CODEX_REVIEW_PROMPT"
     ;;
 esac > /tmp/codex-review-${REVIEW_ID}.txt 2>/tmp/codex-review-${REVIEW_ID}.err
 ```
 
 If `gpt-5.6-sol` is unavailable, retry once without `-m gpt-5.6-sol`; keep the
-high reasoning override. Do not fall back to a legacy hard-coded model.
+low reasoning override. Do not fall back to a legacy hard-coded model.
 
 **Notes:**
 - Both native `codex review` and companion plan tasks are read-only. Do not add
@@ -283,7 +318,7 @@ Start a fresh review each round to avoid cross-session collisions. Include the
 previous review and the exact revisions in the next prompt.
 
 ```bash
-node "$COMPANION" task --fresh --json --model gpt-5.6-sol --effort high \
+node "$COMPANION" task --fresh --json --model gpt-5.6-sol --effort low \
   "I've revised the [plan|code] based on your feedback. The updated content is in /tmp/claude-review-${REVIEW_ID}.md.
 
 Previous review:
@@ -436,7 +471,7 @@ explicitly, avoiding repository-global resume collisions.
 ## Rules
 
 - Code review uses native `codex review`; plan review uses the companion runtime.
-- Default merge-gate model is `gpt-5.6-sol` with high reasoning. If unavailable,
+- Default merge-gate model is `gpt-5.6-sol` with low reasoning. If unavailable,
   retry once with the account default. Honor an explicit user model/effort request.
 - Claude **actively revises** based on Codex feedback between rounds — this is NOT just passing messages, Claude should make real improvements
 - In code review mode, Claude fixes BLOCKING issues only. NON_BLOCKING items are reported but not auto-fixed
