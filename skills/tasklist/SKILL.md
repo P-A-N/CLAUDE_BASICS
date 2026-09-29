@@ -1,10 +1,10 @@
 ---
-name: remaining-tasks
-description: Show the remaining tasks for the current project as a grouped, actionable list — pulled from the conversation, git state, project docs, open issues, and running background work. Use when the user types /remaining-tasks or asks for 残タスク / what's left / remaining work / TODO list.
+name: tasklist
+description: Show the remaining tasks for the current project as a grouped, actionable list — pulled from the conversation, git state, project docs, open issues, and running background work. Use when the user types /tasklist or asks for 残タスク / what's left / remaining work / TODO list.
 user_invocable: true
 ---
 
-# remaining-tasks
+# tasklist
 
 Produce an up-to-date list of what is left to do. **Read-only: list the tasks, do not start doing them.**
 
