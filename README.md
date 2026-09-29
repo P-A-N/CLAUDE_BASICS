@@ -10,6 +10,7 @@ Claude Code を使った開発でプロジェクト横断的に再利用した�
 | [`claude_basics.md`](./claude_basics.md) | プロジェクト非依存の Claude 作業ルール（基本姿勢）。親 `CLAUDE.md` から参照 / コピーして使う |
 | [`auto_implement_issues.sh`](./auto_implement_issues.sh) | GitHub issue を Claude Code + `/codex-review` で自動実装 / 自動調査するスクリプト |
 | [`skills/autoimplement/SKILL.md`](./skills/autoimplement/) | `auto_implement_issues.sh` を呼び出す Claude Code スキル (`/autoimplement`) |
+| [`skills/remaining-tasks/SKILL.md`](./skills/remaining-tasks/) | 残タスクを会話・git・CLAUDE.md・issue から集めて分類して出すスキル (`/remaining-tasks`)。一覧を出すだけで手は付けない |
 | [`setup/install_tools.ps1`](./setup/install_tools.ps1) / [`.sh`](./setup/install_tools.sh) | Python / Node / uv / gh / jq / Claude Code / Codex CLI を一括インストールする |
 | [`setup/install_aliases.ps1`](./setup/install_aliases.ps1) / [`.sh`](./setup/install_aliases.sh) | `cc` / `cdx` シェルショートカットをシェルのプロファイルに登録する |
 
